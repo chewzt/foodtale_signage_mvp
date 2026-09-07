@@ -30,6 +30,8 @@ class DemoSeeder extends Seeder
 
         $playlist = Playlist::query()->create([
             'name' => 'Thongkee Downstairs',
+            'kind' => Playlist::KIND_PLAYLIST,
+            'panel_count' => 1,
             'start_at' => now()->addSeconds(12),
         ]);
 

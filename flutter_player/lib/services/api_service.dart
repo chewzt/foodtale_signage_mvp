@@ -41,6 +41,26 @@ class ApiService {
     return jsonDecode(response.body)['device_token'];
   }
 
+  Future<AppVersion?> getAppVersion() async {
+    if (baseUrl.isEmpty) return null;
+    final response = await http.get(
+      Uri.parse('$baseUrl/api/app/version'),
+      headers: {'Accept': 'application/json'},
+    );
+    if (response.statusCode >= 300) {
+      return null;
+    }
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    if (json['available'] != true) return null;
+    final url = json['apk_url'] as String?;
+    if (url == null || url.isEmpty) return null;
+    return AppVersion(
+      version: json['version'] as String? ?? '',
+      versionCode: (json['version_code'] as num?)?.toInt() ?? 0,
+      apkUrl: url,
+    );
+  }
+
   Future<NtpSample> probeNtp() async {
     final t0 = DateTime.now().microsecondsSinceEpoch;
     final uri = Uri.parse('$baseUrl/api/time').replace(
@@ -55,13 +75,48 @@ class ApiService {
     return NtpSample.parse(json, t0: t0, t3: t3);
   }
 
-  Future<PlayerManifest> getManifest(
+  Future<ManifestFetch> getManifest(
+    String token, {
+    required int clockOffsetMs,
+    required int clockRttMs,
+    String? etag,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/device/manifest').replace(
+      queryParameters: {
+        'clock_offset_ms': '$clockOffsetMs',
+        'clock_rtt_ms': '$clockRttMs',
+      },
+    );
+    final headers = <String, String>{
+      'Authorization': 'Bearer $token',
+      'Accept': 'application/json',
+    };
+    if (etag != null && etag.isNotEmpty) {
+      headers['If-None-Match'] = etag;
+    }
+    final response = await http.get(uri, headers: headers);
+    if (response.statusCode == 304) {
+      return ManifestFetch(unchanged: true, etag: etag);
+    }
+    if (response.statusCode >= 300) {
+      throw Exception('Manifest error: ${response.body}');
+    }
+    return ManifestFetch(
+      unchanged: false,
+      etag: response.headers['etag'],
+      manifest: PlayerManifest.fromJson(jsonDecode(response.body)),
+    );
+  }
+
+  Future<SyncConfirm> confirmSync(
     String token, {
     required int clockOffsetMs,
     required int clockRttMs,
   }) async {
-    final uri = Uri.parse('$baseUrl/api/device/manifest').replace(
+    final t0 = DateTime.now().microsecondsSinceEpoch;
+    final uri = Uri.parse('$baseUrl/api/device/sync-confirm').replace(
       queryParameters: {
+        't0': '$t0',
         'clock_offset_ms': '$clockOffsetMs',
         'clock_rtt_ms': '$clockRttMs',
       },
@@ -70,11 +125,31 @@ class ApiService {
       uri,
       headers: {'Authorization': 'Bearer $token'},
     );
+    final t3 = DateTime.now().microsecondsSinceEpoch;
     if (response.statusCode >= 300) {
-      throw Exception('Manifest error: ${response.body}');
+      throw Exception('Sync confirm error: ${response.body}');
     }
-    return PlayerManifest.fromJson(jsonDecode(response.body));
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    final remaining = (json['remaining_ms'] as num?)?.toInt() ?? 0;
+    return SyncConfirm(
+      sample: NtpSample.parse(json, t0: t0, t3: t3),
+      nextCutAt: DateTime.parse(json['next_cut_at'] as String).toUtc(),
+      remainingMs: remaining,
+      confirmId: json['confirm_id'] as String? ?? json['next_cut_at'] as String,
+    );
   }
+}
+
+class AppVersion {
+  final String version;
+  final int versionCode;
+  final String apkUrl;
+
+  const AppVersion({
+    required this.version,
+    required this.versionCode,
+    required this.apkUrl,
+  });
 }
 
 class NtpSample {
@@ -117,5 +192,31 @@ class NtpSample {
   int get delayUs => (t3 - t0) - (t2 - t1);
 
   int get offsetUs => ((t1 - t0) + (t2 - t3)) ~/ 2;
+}
+
+class SyncConfirm {
+  final NtpSample sample;
+  final DateTime nextCutAt;
+  final int remainingMs;
+  final String confirmId;
+
+  const SyncConfirm({
+    required this.sample,
+    required this.nextCutAt,
+    required this.remainingMs,
+    required this.confirmId,
+  });
+}
+
+class ManifestFetch {
+  final bool unchanged;
+  final String? etag;
+  final PlayerManifest? manifest;
+
+  const ManifestFetch({
+    required this.unchanged,
+    this.etag,
+    this.manifest,
+  });
 }
 

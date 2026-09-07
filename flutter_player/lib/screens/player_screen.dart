@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import '../models/player_manifest.dart';
 import '../services/api_service.dart';
+import '../services/peer_lan_service.dart';
 import '../services/sync_clock_service.dart';
 
 class PlayerScreen extends StatefulWidget {
@@ -47,10 +49,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _cutBusy = false;
   String? error;
   String? _contentKey;
+  String? _manifestEtag;
+  late final PeerLanService _peers;
+  bool _wasReleased = false;
+  DateTime? _confirmedCutAt;
+  String? _confirmedId;
+  bool _confirmBusy = false;
 
   @override
   void initState() {
     super.initState();
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _peers = PeerLanService(clock: widget.clock, onUpdate: _onPeers);
     load();
   }
 
@@ -58,6 +74,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       await widget.clock.start();
       widget.clock.addListener(_onClock);
+      await _peers.start();
       await _refreshManifest(force: true);
       loopTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
         unawaited(_tick());
@@ -77,9 +94,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _onClock() {
-    _scheduleAbsoluteCut();
+    if (_peers.released || (manifest?.peerCount ?? 1) <= 1) {
+      _scheduleAbsoluteCut();
+    }
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  void _onPeers() {
+    if (mounted) setState(() {});
+    if (!_peers.released) return;
+    if (!_wasReleased) {
+      _wasReleased = true;
+      unawaited(_prepareCurrent());
+    }
+    _scheduleAbsoluteCut();
+  }
+
+  void _bindPeers(PlayerManifest next) {
+    final groupChanged = next.groupKey != _peers.group;
+    _peers.bind(
+      deviceId: next.deviceId,
+      group: next.groupKey,
+      peerCount: next.peerCount,
+      serverStartAt: next.startAtUtc,
+    );
+    if (groupChanged) {
+      _wasReleased = false;
     }
   }
 
@@ -87,26 +129,38 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_refreshBusy || _tickBusy) return;
     _refreshBusy = true;
     try {
-      final next = await widget.api.getManifest(
+      final fetch = await widget.api.getManifest(
         widget.token,
         clockOffsetMs: widget.clock.offsetMs,
         clockRttMs: widget.clock.rttMs,
+        etag: force ? null : _manifestEtag,
       );
+      if (fetch.unchanged || fetch.manifest == null) {
+        if (fetch.etag != null) _manifestEtag = fetch.etag;
+        return;
+      }
+      final next = fetch.manifest!;
+      if (fetch.etag != null) _manifestEtag = fetch.etag;
       final contentKey =
           '${next.playlistName}|${next.items.map((i) => '${i.id}:${i.url}:${i.durationMs}').join(',')}';
       final sameContent = contentKey == _contentKey;
       manifest = next;
-      final originMs = next.startAtUtc.millisecondsSinceEpoch;
+      _bindPeers(next);
+      final originMs = _axisOrigin(next).millisecondsSinceEpoch;
       final originChanged = originMs != _originMs;
       _originMs = originMs;
       if (!force && sameContent) {
         if (originChanged) _scheduleAbsoluteCut();
+        if (mounted) setState(() {});
         return;
       }
       _contentKey = contentKey;
       await _prefetchAll(next);
-      await _prepareCurrent();
-      _scheduleAbsoluteCut();
+      _peers.markReady();
+      if (_peers.released || next.peerCount <= 1) {
+        await _prepareCurrent();
+        _scheduleAbsoluteCut();
+      }
       if (mounted) {
         setState(() {
           error = null;
@@ -125,6 +179,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  DateTime _axisOrigin(PlayerManifest m) => m.startAtUtc;
+
   int _totalDuration(PlayerManifest m) =>
       m.items.fold(0, (sum, item) => sum + item.durationMs);
 
@@ -133,7 +189,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return (index: -1, positionMs: 0, waitingMs: 0);
     }
     final total = _totalDuration(m);
-    final elapsed = widget.clock.nowUtc.difference(m.startAtUtc).inMilliseconds;
+    final elapsed = widget.clock.nowUtc.difference(_axisOrigin(m)).inMilliseconds;
     if (elapsed < 0) {
       return (index: -1, positionMs: 0, waitingMs: -elapsed);
     }
@@ -151,7 +207,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   DateTime? _nextCutAt(PlayerManifest m) {
     if (m.items.isEmpty) return null;
-    final origin = m.startAtUtc.toUtc();
+    final origin = _axisOrigin(m);
     final now = widget.clock.nowUtc;
     if (now.isBefore(origin)) return origin;
     final total = _totalDuration(m);
@@ -173,9 +229,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _cutTimer?.cancel();
     final m = manifest;
     if (m == null || m.items.isEmpty) return;
-    final cutAt = _nextCutAt(m);
+    if (!_peers.released && m.peerCount > 1) return;
+    var cutAt = _nextCutAt(m);
+    final confirmed = _confirmedCutAt;
+    if (confirmed != null) {
+      final now = widget.clock.nowUtc;
+      if (!confirmed.isBefore(now) &&
+          (cutAt == null ||
+              confirmed.difference(cutAt).inMilliseconds.abs() < 8000)) {
+        cutAt = confirmed;
+      }
+    }
     if (cutAt == null) return;
-    final delay = cutAt.difference(widget.clock.nowUtc);
+    final armed = cutAt;
+    final delay = armed.difference(widget.clock.nowUtc);
     if (delay <= Duration.zero) {
       _cutTimer = Timer(Duration.zero, () => unawaited(_onAbsoluteCut()));
       return;
@@ -185,7 +252,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     _cutTimer = Timer(const Duration(milliseconds: 4), () {
-      if (!widget.clock.nowUtc.isBefore(cutAt)) {
+      if (!widget.clock.nowUtc.isBefore(armed)) {
         unawaited(_onAbsoluteCut());
       } else {
         _scheduleAbsoluteCut();
@@ -212,6 +279,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (live.index != currentIndex) {
         currentIndex = live.index;
         _revealItem(m.items[live.index]);
+      }
+      final confirmed = _confirmedCutAt;
+      if (confirmed != null && !widget.clock.nowUtc.isBefore(confirmed)) {
+        _confirmedCutAt = null;
+        _confirmedId = null;
       }
     } finally {
       _cutBusy = false;
@@ -337,6 +409,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
 
+    if (!_peers.released && m.peerCount > 1) {
+      currentIndex = -1;
+      _waitingMs = 0;
+      await _prepareStandby(m.items.first);
+      if (mounted) setState(() {});
+      return;
+    }
+
     final live = _timeline(m);
     _waitingMs = live.waitingMs;
     if (live.waitingMs > 0) {
@@ -361,6 +441,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       final m = manifest;
       if (m == null || m.items.isEmpty) return;
+      if (!_peers.released && m.peerCount > 1) return;
 
       final live = _timeline(m);
       if (live.waitingMs > 0) {
@@ -376,8 +457,40 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (_waitingMs > 0) return;
 
       if (currentIndex >= 0) _primeNext();
+      unawaited(_confirmUpcomingCut(m, live));
     } finally {
       _tickBusy = false;
+    }
+  }
+
+  Future<void> _confirmUpcomingCut(
+    PlayerManifest m,
+    ({int index, int positionMs, int waitingMs}) live,
+  ) async {
+    if (_confirmBusy || live.waitingMs > 0 || live.index < 0) return;
+    final remaining = m.items[live.index].durationMs - live.positionMs;
+    if (remaining > 5000 || remaining < 200) return;
+    if (_confirmedCutAt != null &&
+        _confirmedCutAt!.isAfter(widget.clock.nowUtc)) {
+      return;
+    }
+
+    _confirmBusy = true;
+    try {
+      final conf = await widget.api.confirmSync(
+        widget.token,
+        clockOffsetMs: widget.clock.offsetMs,
+        clockRttMs: widget.clock.rttMs,
+      );
+      if (_confirmedId == conf.confirmId) return;
+      _confirmedId = conf.confirmId;
+      _confirmedCutAt = conf.nextCutAt;
+      widget.clock.applyNtpSample(conf.sample);
+      _scheduleAbsoluteCut();
+    } catch (_) {
+      // keep the local cut timer; try again next 5s window
+    } finally {
+      _confirmBusy = false;
     }
   }
 
@@ -387,9 +500,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     manifestTimer?.cancel();
     _cutTimer?.cancel();
     widget.clock.removeListener(_onClock);
+    _peers.dispose();
     controller?.dispose();
     _standbyVideo?.dispose();
     widget.clock.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
 
@@ -398,42 +513,82 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (loading) {
       return const Scaffold(
         backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator()),
+        body: SafeArea(child: Center(child: CircularProgressIndicator())),
       );
     }
     if (error != null) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Text(error!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white)),
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white)),
+                    const SizedBox(height: 20),
+                    FilledButton(
+                      onPressed: () => unawaited(_refreshManifest(force: true)),
+                      child: const Text('Retry'),
+                    ),
+                    _changeServerButton(),
+                  ],
+                ),
               ),
-              const SizedBox(height: 20),
-              FilledButton(
-                onPressed: () => unawaited(_refreshManifest(force: true)),
-                child: const Text('Retry'),
-              ),
-              _changeServerButton(),
-            ],
+            ),
           ),
         ),
       );
     }
 
     final m = manifest!;
+    if (!_peers.released && m.peerCount > 1) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _peers.statusLine,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 22),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Cold start: waiting for this phone to finish prefetch',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54, fontSize: 14),
+                  ),
+                  _changeServerButton(),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     if (_waitingMs > 0) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-          child: Text(
-            'Sync starts in ${(_waitingMs / 1000).ceil()}s',
-            style: const TextStyle(color: Colors.white, fontSize: 32),
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Sync starts in ${(_waitingMs / 1000).ceil()}s',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 28),
+              ),
+            ),
           ),
         ),
       );
@@ -444,55 +599,80 @@ class _PlayerScreenState extends State<PlayerScreen> {
           m.playlistName.isEmpty || m.playlistName == 'Unassigned';
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                unassigned
-                    ? 'Waiting for playlist…'
-                    : 'Playlist "${m.playlistName}" has no media',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 28),
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    unassigned
+                        ? 'Waiting for playlist…'
+                        : 'Playlist "${m.playlistName}" has no media',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 22),
+                  ),
+                  const SizedBox(height: 20),
+                  FilledButton(
+                    onPressed: () => unawaited(_refreshManifest(force: true)),
+                    child: const Text('Refresh now'),
+                  ),
+                  _changeServerButton(),
+                ],
               ),
-              const SizedBox(height: 20),
-              FilledButton(
-                onPressed: () => unawaited(_refreshManifest(force: true)),
-                child: const Text('Refresh now'),
-              ),
-              _changeServerButton(),
-            ],
+            ),
           ),
         ),
       );
     }
 
     final item = m.items[currentIndex];
+    final orientation = MediaQuery.orientationOf(context);
 
     return Scaffold(
       backgroundColor: Colors.black,
+      resizeToAvoidBottomInset: false,
       body: Stack(
+        fit: StackFit.expand,
         children: [
           Positioned.fill(
-            child: item.type == 'video' ? _videoWidget() : _imageWidget(),
+            child: KeyedSubtree(
+              key: ValueKey(
+                '${item.id}-${item.type}-$orientation-'
+                '${MediaQuery.sizeOf(context).width.round()}x'
+                '${MediaQuery.sizeOf(context).height.round()}',
+              ),
+              child: item.type == 'video' ? _videoWidget() : _imageWidget(),
+            ),
           ),
           Positioned(
             left: 12,
             bottom: 8,
-            child: Opacity(
-              opacity: 0.4,
-              child: Text(
-                'offset ${widget.clock.offsetMs}ms · rtt ${widget.clock.rttMs}ms',
-                style: const TextStyle(color: Colors.white, fontSize: 12),
+            right: 88,
+            child: SafeArea(
+              child: Opacity(
+                opacity: 0.4,
+                child: Text(
+                  [
+                    'offset ${widget.clock.offsetMs}ms',
+                    'rtt ${widget.clock.rttMs}ms',
+                    _peers.statusLine,
+                    if (m.isCarousel) 'part ${m.panelIndex + 1}/${m.panelCount}',
+                  ].join(' · '),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
               ),
             ),
           ),
           Positioned(
             right: 12,
             bottom: 8,
-            child: Opacity(
-              opacity: 0.35,
-              child: _changeServerButton(),
+            child: SafeArea(
+              child: Opacity(
+                opacity: 0.35,
+                child: _changeServerButton(),
+              ),
             ),
           ),
         ],
@@ -512,7 +692,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (file == null) {
       return const Center(child: CircularProgressIndicator());
     }
-    return Image.file(file, fit: BoxFit.cover);
+    return _coverFrame(
+      Image.file(file, fit: BoxFit.fill, filterQuality: FilterQuality.medium),
+      null,
+    );
   }
 
   Widget _videoWidget() {
@@ -520,13 +703,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (c == null || !c.value.isInitialized) {
       return const Center(child: CircularProgressIndicator());
     }
-    return FittedBox(
-      fit: BoxFit.cover,
-      child: SizedBox(
-        width: c.value.size.width,
-        height: c.value.size.height,
-        child: VideoPlayer(c),
-      ),
+    return _coverFrame(VideoPlayer(c), c.value.size);
+  }
+
+  Widget _coverFrame(Widget child, Size? source) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final screen = Size(constraints.maxWidth, constraints.maxHeight);
+        if (screen.width <= 0 || screen.height <= 0) {
+          return const SizedBox.expand();
+        }
+        final src = source ?? screen;
+        if (src.width <= 0 || src.height <= 0) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.cover,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(
+              width: src.width,
+              height: src.height,
+              child: child,
+            ),
+          ),
+        );
+      },
     );
   }
 }

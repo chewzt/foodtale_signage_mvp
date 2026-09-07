@@ -19,18 +19,26 @@ Artisan::command('signage:lan {--port=8000}', function () {
 Artisan::command('signage:serve {--host=0.0.0.0} {--port=8000}', function () {
     $host = (string) $this->option('host');
     $port = (string) $this->option('port');
+    $router = file_exists(base_path('server.php'))
+        ? base_path('server.php')
+        : base_path('vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php');
+
+    // php -d on `artisan serve` is useless: Laravel then forks `php -S`
+    // without those flags, so upload_max_filesize stays at the default 2M.
     $parts = [escapeshellarg(PHP_BINARY)];
     foreach (SignageUpload::phpServeDirectives() as $directive) {
         $parts[] = '-d '.escapeshellarg($directive);
     }
-    $parts[] = escapeshellarg(base_path('artisan'));
-    $parts[] = 'serve';
-    $parts[] = '--host='.escapeshellarg($host);
-    $parts[] = '--port='.escapeshellarg($port);
+    $parts[] = '-S';
+    $parts[] = escapeshellarg($host.':'.$port);
+    $parts[] = escapeshellarg($router);
     $cmd = implode(' ', $parts);
 
     $this->line(SignageUrl::cliBase((int) $port));
-    $this->comment('Upload ceiling: '.SignageUpload::maxMegabytes().' MB');
+    $this->comment('Upload ceiling: '.SignageUpload::maxMegabytes().' MB (applied to php -S)');
+    $this->comment('Press Ctrl+C to stop the server');
+
+    chdir(public_path());
     passthru($cmd, $code);
 
     return is_int($code) ? $code : 0;

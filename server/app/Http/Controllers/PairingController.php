@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Device;
+use App\Support\SignagePeers;
 use Illuminate\Http\Request;
 
 class PairingController extends Controller
@@ -24,6 +25,8 @@ class PairingController extends Controller
             'status' => 'online',
             'last_seen_at' => now(),
         ]);
+
+        SignagePeers::claimPlaylist($device);
 
         return response()->json([
             'device_token' => $device->device_token,

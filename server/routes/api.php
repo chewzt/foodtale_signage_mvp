@@ -3,10 +3,15 @@
 use App\Http\Controllers\DeviceController;
 use App\Http\Controllers\PairingController;
 use App\Models\Playlist;
+use App\Support\SignageApk;
 use App\Support\SignageManifest;
 use App\Support\SignageNtp;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+
+Route::get('/app/version', function (Request $request) {
+    return response()->json(SignageApk::meta($request));
+});
 
 Route::get('/time', function (Request $request) {
     return response()->json(SignageNtp::payload($request->query('t0')));
@@ -14,6 +19,7 @@ Route::get('/time', function (Request $request) {
 
 Route::post('/pair', [PairingController::class, 'pair']);
 Route::get('/device/manifest', [DeviceController::class, 'manifest']);
+Route::get('/device/sync-confirm', [DeviceController::class, 'syncConfirm']);
 Route::post('/device/heartbeat', [DeviceController::class, 'heartbeat']);
 
 Route::get('/demo/playlist', function () {

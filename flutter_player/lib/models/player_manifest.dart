@@ -6,18 +6,45 @@ enum PlaybackFit {
 
 class PlayerManifest {
   final String playlistName;
+  final int playlistId;
+  final int deviceId;
+  final String kind;
+  final int panelCount;
+  final int panelIndex;
+  final int peerCount;
   final DateTime startAtUtc;
   final List<MediaItem> items;
 
   PlayerManifest({
     required this.playlistName,
+    required this.playlistId,
+    required this.deviceId,
+    required this.kind,
+    required this.panelCount,
+    required this.panelIndex,
+    required this.peerCount,
     required this.startAtUtc,
     required this.items,
   });
 
+  bool get isCarousel => kind == 'carousel' && panelCount > 1;
+
+  String get groupKey => 'p$playlistId|${startAtUtc.millisecondsSinceEpoch}';
+
   factory PlayerManifest.fromJson(Map<String, dynamic> json) {
+    final panelCount = (json['panel_count'] as num?)?.toInt() ?? 1;
+    final rawIndex = (json['panel_index'] as num?)?.toInt() ?? 0;
+    final panels = panelCount < 1 ? 1 : panelCount;
+    final index = rawIndex.clamp(0, panels - 1);
+
     return PlayerManifest(
       playlistName: json['playlist_name'] ?? 'Playlist',
+      playlistId: (json['playlist_id'] as num?)?.toInt() ?? 0,
+      deviceId: (json['device_id'] as num?)?.toInt() ?? 0,
+      kind: json['kind'] as String? ?? 'playlist',
+      panelCount: panels,
+      panelIndex: index,
+      peerCount: (json['peer_count'] as num?)?.toInt() ?? 1,
       startAtUtc: DateTime.parse(json['start_at']).toUtc(),
       items: (json['items'] as List<dynamic>? ?? [])
           .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))

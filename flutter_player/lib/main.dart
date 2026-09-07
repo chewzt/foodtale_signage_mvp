@@ -4,6 +4,7 @@ import 'screens/pairing_screen.dart';
 import 'screens/player_screen.dart';
 import 'services/api_service.dart';
 import 'services/sync_clock_service.dart';
+import 'widgets/app_update_host.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,14 +52,17 @@ class _SignageAppState extends State<SignageApp> {
       theme: ThemeData(useMaterial3: true),
       home: loading
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-          : token == null
-              ? PairingScreen(api: api, onPaired: _load)
-              : PlayerScreen(
-                  api: api,
-                  clock: SyncClockService(api),
-                  token: token!,
-                  onChangeServer: _changeServer,
-                ),
+          : AppUpdateHost(
+              api: api,
+              child: token == null
+                  ? PairingScreen(api: api, onPaired: _load)
+                  : PlayerScreen(
+                      api: api,
+                      clock: SyncClockService(api),
+                      token: token!,
+                      onChangeServer: _changeServer,
+                    ),
+            ),
     );
   }
 }

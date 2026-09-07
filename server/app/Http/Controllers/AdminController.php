@@ -6,6 +6,7 @@ use App\Models\Device;
 use App\Models\Playlist;
 use App\Models\PlaylistItem;
 use App\Support\MediaDuration;
+use App\Support\SignageApk;
 use App\Support\SignageDeviceClock;
 use App\Support\SignageFit;
 use App\Support\SignageTimeline;
@@ -14,15 +15,22 @@ use App\Support\SignageUrl;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class AdminController extends Controller
 {
     public function index()
     {
+        $all = Playlist::with('items')->latest()->get();
+
         return view('admin', [
             'devices' => Device::with('playlist')->latest()->get(),
-            'playlists' => Playlist::with('items')->latest()->get(),
+            'playlists' => $all->where('kind', Playlist::KIND_PLAYLIST)->values(),
+            'carousels' => $all->where('kind', Playlist::KIND_CAROUSEL)->values(),
+            'assignTargets' => $all,
             'serverUrl' => SignageUrl::lanBase(),
+            'apkUrl' => SignageUrl::lanBase().'/'.SignageApk::FILENAME,
+            'apkVersion' => SignageApk::meta()['version'],
             'uploadMaxMb' => SignageUpload::maxMegabytes(),
         ]);
     }
@@ -44,7 +52,7 @@ class AdminController extends Controller
 
     public function demo()
     {
-        $playlist = Playlist::with('items')->latest()->first();
+        $playlist = Playlist::with('items')->playlists()->latest()->first();
 
         return view('demo', [
             'playlist' => $playlist,
@@ -66,6 +74,25 @@ class AdminController extends Controller
 
         Playlist::create([
             'name' => $data['name'],
+            'kind' => Playlist::KIND_PLAYLIST,
+            'panel_count' => 1,
+            'start_at' => SignageTimeline::origin(),
+        ]);
+
+        return $this->finished($request);
+    }
+
+    public function createCarousel(Request $request)
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'panel_count' => ['required', 'integer', 'min:2', 'max:8'],
+        ]);
+
+        Playlist::create([
+            'name' => $data['name'],
+            'kind' => Playlist::KIND_CAROUSEL,
+            'panel_count' => $data['panel_count'],
             'start_at' => SignageTimeline::origin(),
         ]);
 
@@ -74,22 +101,45 @@ class AdminController extends Controller
 
     public function uploadItem(Request $request, Playlist $playlist)
     {
-        $data = $request->validate([
-            'media' => ['required', 'file', 'mimes:mp4,jpg,jpeg,png,webp', 'max:'.SignageUpload::maxKilobytes()],
-            'fit' => ['nullable', 'in:once,loop,cut'],
-            'slot_seconds' => ['nullable', 'integer', 'min:1', 'max:600'],
-        ]);
+        SignageUpload::rejectIfPhpRejected($request);
+
+        if ($playlist->isCarousel()) {
+            $data = $request->validate([
+                'media' => ['required', 'file', 'max:'.SignageUpload::maxKilobytes()],
+                'panel_index' => ['required', 'integer', 'min:0', 'max:7'],
+                'fit' => ['nullable', 'in:once,loop,cut'],
+                'slot_seconds' => ['nullable', 'integer', 'min:1', 'max:600'],
+            ]);
+            if ((int) $data['panel_index'] >= $playlist->panel_count) {
+                throw ValidationException::withMessages([
+                    'panel_index' => 'This carousel only has '.$playlist->panel_count.' panels.',
+                ]);
+            }
+        } else {
+            $data = $request->validate([
+                'media' => ['required', 'file', 'max:'.SignageUpload::maxKilobytes()],
+                'fit' => ['nullable', 'in:once,loop,cut'],
+                'slot_seconds' => ['nullable', 'integer', 'min:1', 'max:600'],
+            ]);
+        }
 
         $file = $data['media'];
-        $path = $file->store('signage', 'public');
+        $type = SignageUpload::assertAccepted($file, $playlist->isCarousel());
+        $path = SignageUpload::storePlayable($file, $type);
         $absolute = Storage::disk('public')->path($path);
-
-        $type = str_starts_with((string) $file->getMimeType(), 'video/') ? 'video' : 'image';
         $fileMs = $type === 'video' ? MediaDuration::probeMilliseconds($absolute) : null;
-
         $fit = $type === 'image' ? 'once' : ($data['fit'] ?? 'loop');
         $slotMs = (($data['slot_seconds'] ?? 10) * 1000);
         $durationMs = SignageFit::durationMs($fit, $fileMs, $slotMs);
+
+        $panelIndex = $playlist->isCarousel() ? (int) $data['panel_index'] : null;
+        if ($playlist->isCarousel()) {
+            $old = $playlist->items()->where('panel_index', $panelIndex)->get();
+            foreach ($old as $item) {
+                Storage::disk('public')->delete($item->path);
+                $item->delete();
+            }
+        }
 
         $playlist->items()->create([
             'type' => $type,
@@ -97,7 +147,10 @@ class AdminController extends Controller
             'duration_ms' => $durationMs,
             'fit' => $fit,
             'file_duration_ms' => $fileMs,
-            'sort_order' => ($playlist->items()->max('sort_order') ?? 0) + 1,
+            'sort_order' => $panelIndex !== null
+                ? $panelIndex + 1
+                : ($playlist->items()->max('sort_order') ?? 0) + 1,
+            'panel_index' => $panelIndex,
         ]);
 
         $playlist->update(['start_at' => SignageTimeline::origin()]);
@@ -144,6 +197,22 @@ class AdminController extends Controller
         return $this->finished($request);
     }
 
+    public function deletePlaylist(Request $request, Playlist $playlist)
+    {
+        foreach ($playlist->items as $item) {
+            Storage::disk('public')->delete($item->path);
+        }
+
+        Device::query()->where('playlist_id', $playlist->id)->update([
+            'playlist_id' => null,
+            'panel_index' => 0,
+        ]);
+
+        $playlist->delete();
+
+        return $this->finished($request);
+    }
+
     public function createPairingCode(Request $request)
     {
         Device::create([
@@ -159,17 +228,36 @@ class AdminController extends Controller
     {
         $data = $request->validate([
             'playlist_id' => ['required', 'exists:playlists,id'],
+            'panel_index' => ['nullable', 'integer', 'min:0', 'max:7'],
         ]);
 
-        $device->update(['playlist_id' => $data['playlist_id']]);
-        $device->playlist?->update(['start_at' => SignageTimeline::origin()]);
+        $playlist = Playlist::query()->findOrFail($data['playlist_id']);
+        $panelIndex = 0;
+
+        if ($playlist->isCarousel()) {
+            $panelIndex = (int) ($data['panel_index'] ?? 0);
+            if ($panelIndex < 0 || $panelIndex >= $playlist->panel_count) {
+                throw ValidationException::withMessages([
+                    'panel_index' => 'Pick part 1–'.$playlist->panel_count.' for this carousel.',
+                ]);
+            }
+        }
+
+        $device->update([
+            'playlist_id' => $playlist->id,
+            'panel_index' => $panelIndex,
+        ]);
+        $playlist->update(['start_at' => SignageTimeline::origin()]);
 
         return $this->finished($request);
     }
 
     public function unassignPlaylist(Request $request, Device $device)
     {
-        $device->update(['playlist_id' => null]);
+        $device->update([
+            'playlist_id' => null,
+            'panel_index' => 0,
+        ]);
 
         return $this->finished($request);
     }
@@ -179,6 +267,7 @@ class AdminController extends Controller
         $device->update([
             'device_token' => null,
             'playlist_id' => null,
+            'panel_index' => 0,
             'status' => 'waiting',
             'last_seen_at' => null,
             'name' => 'Unpaired TV',
