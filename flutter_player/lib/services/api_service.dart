@@ -1,0 +1,121 @@
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import '../models/player_manifest.dart';
+
+class ApiService {
+  String baseUrl;
+  ApiService(this.baseUrl);
+
+  void useBaseUrl(String url) {
+    baseUrl = _normalize(url);
+  }
+
+  static String normalize(String raw) {
+    return _normalize(raw);
+  }
+
+  static String _normalize(String raw) {
+    var url = raw.trim();
+    if (url.isEmpty) return url;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'http://$url';
+    }
+    if (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url;
+  }
+
+  Future<String> pairDevice(String pairingCode, String deviceName) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/pair'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'pairing_code': pairingCode,
+        'device_name': deviceName,
+      }),
+    );
+    if (response.statusCode >= 300) {
+      throw Exception('Pairing failed: ${response.body}');
+    }
+    return jsonDecode(response.body)['device_token'];
+  }
+
+  Future<NtpSample> probeNtp() async {
+    final t0 = DateTime.now().microsecondsSinceEpoch;
+    final uri = Uri.parse('$baseUrl/api/time').replace(
+      queryParameters: {'t0': '$t0'},
+    );
+    final response = await http.get(uri);
+    final t3 = DateTime.now().microsecondsSinceEpoch;
+    if (response.statusCode >= 300) {
+      throw Exception('Could not get server time');
+    }
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    return NtpSample.parse(json, t0: t0, t3: t3);
+  }
+
+  Future<PlayerManifest> getManifest(
+    String token, {
+    required int clockOffsetMs,
+    required int clockRttMs,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/device/manifest').replace(
+      queryParameters: {
+        'clock_offset_ms': '$clockOffsetMs',
+        'clock_rtt_ms': '$clockRttMs',
+      },
+    );
+    final response = await http.get(
+      uri,
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode >= 300) {
+      throw Exception('Manifest error: ${response.body}');
+    }
+    return PlayerManifest.fromJson(jsonDecode(response.body));
+  }
+}
+
+class NtpSample {
+  final int t0;
+  final int t1;
+  final int t2;
+  final int t3;
+
+  const NtpSample({
+    required this.t0,
+    required this.t1,
+    required this.t2,
+    required this.t3,
+  });
+
+  factory NtpSample.parse(
+    Map<String, dynamic> json, {
+    required int t0,
+    required int t3,
+  }) {
+    final echoed = json['t0'];
+    final t1 = json['t1'];
+    final t2 = json['t2'];
+    if (t1 is num && t2 is num) {
+      return NtpSample(
+        t0: echoed is num ? echoed.toInt() : t0,
+        t1: t1.toInt(),
+        t2: t2.toInt(),
+        t3: t3,
+      );
+    }
+
+    final utc = json['utc'];
+    final serverUs = utc is String
+        ? DateTime.parse(utc).toUtc().microsecondsSinceEpoch
+        : t0 + ((t3 - t0) ~/ 2);
+    return NtpSample(t0: t0, t1: serverUs, t2: serverUs, t3: t3);
+  }
+
+  int get delayUs => (t3 - t0) - (t2 - t1);
+
+  int get offsetUs => ((t1 - t0) + (t2 - t3)) ~/ 2;
+}
+
