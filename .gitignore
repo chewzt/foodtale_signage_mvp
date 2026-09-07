@@ -1,0 +1,25 @@
+.DS_Store
+
+# Secrets and machine-local data
+server/.env
+server/.env.backup
+server/database/*.sqlite
+server/database/*.sqlite-journal
+server/storage/app/public/signage/
+
+# Laravel
+server/vendor/
+server/node_modules/
+server/public/hot
+server/public/storage
+server/public/foodtale-player.apk
+server/storage/logs/*.log
+
+# Flutter
+flutter_player/.dart_tool/
+flutter_player/build/
+flutter_player/.flutter-plugins
+flutter_player/.flutter-plugins-dependencies
+
+# Built player drops
+*.apk
