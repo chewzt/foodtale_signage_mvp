@@ -20,3 +20,4 @@ Route::post('/admin/devices', [AdminController::class, 'createPairingCode']);
 Route::post('/admin/devices/{device}/assign', [AdminController::class, 'assignPlaylist']);
 Route::post('/admin/devices/{device}/unassign', [AdminController::class, 'unassignPlaylist']);
 Route::post('/admin/devices/{device}/reset', [AdminController::class, 'resetDevice']);
+Route::post('/admin/devices/{device}/delete', [AdminController::class, 'deleteDevice']);

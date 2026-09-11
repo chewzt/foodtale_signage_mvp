@@ -29,7 +29,8 @@ class PlayerManifest {
 
   bool get isCarousel => kind == 'carousel' && panelCount > 1;
 
-  String get groupKey => 'p$playlistId|${startAtUtc.millisecondsSinceEpoch}';
+  /// Stable LAN group — omit start_at so origin kicks do not clear peer maps.
+  String get groupKey => 'p$playlistId';
 
   factory PlayerManifest.fromJson(Map<String, dynamic> json) {
     final panelCount = (json['panel_count'] as num?)?.toInt() ?? 1;
@@ -49,6 +50,32 @@ class PlayerManifest {
       items: (json['items'] as List<dynamic>? ?? [])
           .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))
           .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'playlist_name': playlistName,
+        'playlist_id': playlistId,
+        'device_id': deviceId,
+        'kind': kind,
+        'panel_count': panelCount,
+        'panel_index': panelIndex,
+        'peer_count': peerCount,
+        'start_at': startAtUtc.toIso8601String(),
+        'items': items.map((e) => e.toJson()).toList(),
+      };
+
+  PlayerManifest copyWith({DateTime? startAtUtc}) {
+    return PlayerManifest(
+      playlistName: playlistName,
+      playlistId: playlistId,
+      deviceId: deviceId,
+      kind: kind,
+      panelCount: panelCount,
+      panelIndex: panelIndex,
+      peerCount: peerCount,
+      startAtUtc: startAtUtc ?? this.startAtUtc,
+      items: items,
     );
   }
 }
@@ -77,6 +104,18 @@ class MediaItem {
       fit: _parseFit(json['fit'] as String?),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'url': url,
+        'duration_ms': durationMs,
+        'fit': switch (fit) {
+          PlaybackFit.once => 'once',
+          PlaybackFit.loop => 'loop',
+          PlaybackFit.cut => 'cut',
+        },
+      };
 
   bool shouldLoop(int fileMs) {
     switch (fit) {
