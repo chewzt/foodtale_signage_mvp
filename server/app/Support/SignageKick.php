@@ -58,9 +58,9 @@ class SignageKick
         ], $extra));
     }
 
-    private static function nowMs(): int
+    private static function nowMs(): float
     {
-        return (int) round(microtime(true) * 1000);
+        return SignageNtp::unixMilliseconds();
     }
 
     private static function iso(\DateTimeInterface|string $startAt): string

@@ -4,15 +4,24 @@ namespace App\Support;
 
 class SignageNtp
 {
-    public static function unixMicroseconds(): int
+    /**
+     * Unix microseconds as a JSON number.
+     * 32-bit PHP cannot store these in int (PHP_INT_MAX is 2.1e9).
+     */
+    public static function unixMicroseconds(): float
     {
         [$frac, $sec] = explode(' ', microtime(), 2);
 
-        return ((int) $sec * 1_000_000) + (int) round(((float) $frac) * 1_000_000);
+        return ((float) $sec * 1_000_000.0) + round(((float) $frac) * 1_000_000.0);
+    }
+
+    public static function unixMilliseconds(): float
+    {
+        return round(microtime(true) * 1000);
     }
 
     /**
-     * @return array{utc: string, t1: int, t2: int, t0?: int}
+     * @return array{utc: string, t1: float, t2: float, t0?: float}
      */
     public static function payload(mixed $t0): array
     {
@@ -24,7 +33,7 @@ class SignageNtp
         ];
 
         if (is_numeric($t0)) {
-            $body['t0'] = (int) $t0;
+            $body['t0'] = (float) $t0;
         }
 
         return $body;
