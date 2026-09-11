@@ -1,25 +1,31 @@
 import 'dart:async';
 import 'api_service.dart';
 
-/// Local answer: `DateTime.now() + offset ≈ server UTC`.
-/// Offsets differ per phone; the shared axis is still server `start_at`.
-/// After boot, clock refresh comes from sync-confirm — not a 20s /api/time burst.
+/// Local answer: `DateTime.now() + NTP offset ≈ CMS UTC`.
+/// Every box Cristian-samples `/api/time`. Cuts are local vs server `start_at`.
 class SyncClockService {
   final ApiService api;
   Duration _ntpOffset = Duration.zero;
-  Duration _groupSlew = Duration.zero;
   int _rttMs = 0;
+  DateTime? _lastSyncAt;
+  Timer? _repeat;
   final List<void Function()> _listeners = [];
 
   SyncClockService(this.api);
 
-  Duration get offset => _ntpOffset + _groupSlew;
+  Duration get offset => _ntpOffset;
 
   int get offsetMs => offset.inMilliseconds;
 
   int get rttMs => _rttMs;
 
-  DateTime get nowUtc => DateTime.now().toUtc().add(_ntpOffset).add(_groupSlew);
+  bool get hasServerLock {
+    final at = _lastSyncAt;
+    if (at == null) return false;
+    return DateTime.now().difference(at) < const Duration(seconds: 8);
+  }
+
+  DateTime get nowUtc => DateTime.now().toUtc().add(_ntpOffset);
 
   void addListener(void Function() listener) => _listeners.add(listener);
 
@@ -35,11 +41,13 @@ class SyncClockService {
     final collected = <({int delayUs, int offsetUs})>[];
 
     for (var i = 0; i < samples; i++) {
-      final sample = await api.probeNtp();
-      if (sample.delayUs < 0) {
-        continue;
-      }
-      collected.add((delayUs: sample.delayUs, offsetUs: sample.offsetUs));
+      try {
+        final sample = await api.probeNtp();
+        if (sample.delayUs < 0) {
+          continue;
+        }
+        collected.add((delayUs: sample.delayUs, offsetUs: sample.offsetUs));
+      } catch (_) {}
     }
 
     if (collected.isEmpty) {
@@ -52,6 +60,7 @@ class SyncClockService {
     final chosen = best[best.length ~/ 2];
     _ntpOffset = Duration(microseconds: chosen.offsetUs);
     _rttMs = (chosen.delayUs / 1000).round();
+    _lastSyncAt = DateTime.now();
     _notify();
   }
 
@@ -61,33 +70,22 @@ class SyncClockService {
     }
     _ntpOffset = Duration(microseconds: sample.offsetUs);
     _rttMs = (sample.delayUs / 1000).round();
+    _lastSyncAt = DateTime.now();
     _notify();
   }
 
-  void resetGroupSlew() {
-    _groupSlew = Duration.zero;
-  }
-
-  void slewToward(DateTime remoteNow) {
-    final errMs = remoteNow.difference(nowUtc).inMilliseconds;
-    if (errMs.abs() < 3) {
-      return;
-    }
-    final step = (errMs * 0.35).round().clamp(-40, 40);
-    var next = _groupSlew.inMilliseconds + step;
-    if (next > 250) next = 250;
-    if (next < -250) next = -250;
-    _groupSlew = Duration(milliseconds: next);
-    if (step.abs() >= 8) {
-      _notify();
-    }
-  }
+  void resetGroupSlew() {}
 
   Future<void> start() async {
     await sync(samples: 3);
+    _repeat?.cancel();
+    _repeat = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(sync(samples: 1));
+    });
   }
 
   void dispose() {
+    _repeat?.cancel();
     _listeners.clear();
   }
 }

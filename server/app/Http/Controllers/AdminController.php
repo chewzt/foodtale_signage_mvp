@@ -9,6 +9,7 @@ use App\Support\MediaDuration;
 use App\Support\SignageApk;
 use App\Support\SignageDeviceClock;
 use App\Support\SignageFit;
+use App\Support\SignageKick;
 use App\Support\SignageTimeline;
 use App\Support\SignageUpload;
 use App\Support\SignageUrl;
@@ -61,7 +62,7 @@ class AdminController extends Controller
 
     public function restartSync(Request $request, Playlist $playlist)
     {
-        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $this->bumpAndKick($playlist);
 
         return $this->finished($request);
     }
@@ -153,7 +154,7 @@ class AdminController extends Controller
             'panel_index' => $panelIndex,
         ]);
 
-        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $this->bumpAndKick($playlist);
 
         return $this->finished($request);
     }
@@ -181,7 +182,7 @@ class AdminController extends Controller
             'duration_ms' => SignageFit::durationMs($fit, $fileMs, $slotMs),
         ]);
 
-        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $this->bumpAndKick($playlist);
 
         return $this->finished($request);
     }
@@ -192,13 +193,15 @@ class AdminController extends Controller
 
         Storage::disk('public')->delete($item->path);
         $item->delete();
-        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $this->bumpAndKick($playlist);
 
         return $this->finished($request);
     }
 
     public function deletePlaylist(Request $request, Playlist $playlist)
     {
+        $playlistId = (int) $playlist->id;
+        $origin = SignageTimeline::origin();
         foreach ($playlist->items as $item) {
             Storage::disk('public')->delete($item->path);
         }
@@ -208,6 +211,7 @@ class AdminController extends Controller
             'panel_index' => 0,
         ]);
 
+        SignageKick::wall($playlistId, $origin);
         $playlist->delete();
 
         return $this->finished($request);
@@ -247,23 +251,28 @@ class AdminController extends Controller
             'playlist_id' => $playlist->id,
             'panel_index' => $panelIndex,
         ]);
-        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $this->bumpAndKick($playlist, ['device_id' => (int) $device->id]);
 
         return $this->finished($request);
     }
 
     public function unassignPlaylist(Request $request, Device $device)
     {
+        $old = $device->playlist;
         $device->update([
             'playlist_id' => null,
             'panel_index' => 0,
         ]);
+        if ($old) {
+            $this->bumpAndKick($old, ['device_id' => (int) $device->id]);
+        }
 
         return $this->finished($request);
     }
 
     public function resetDevice(Request $request, Device $device)
     {
+        $old = $device->playlist;
         $device->update([
             'device_token' => null,
             'playlist_id' => null,
@@ -272,8 +281,36 @@ class AdminController extends Controller
             'last_seen_at' => null,
             'name' => 'Unpaired TV',
         ]);
+        if ($old) {
+            $this->bumpAndKick($old);
+        }
 
         return $this->finished($request);
+    }
+
+    public function deleteDevice(Request $request, Device $device)
+    {
+        $old = $device->playlist;
+        $device->delete();
+        if ($old) {
+            $this->bumpAndKick($old);
+        }
+
+        return $this->finished($request);
+    }
+
+    /**
+     * @param  array<string, mixed>  $extra
+     */
+    private function bumpAndKick(Playlist $playlist, array $extra = []): void
+    {
+        $playlist->update(['start_at' => SignageTimeline::origin()]);
+        $playlist->refresh();
+        SignageKick::wall(
+            (int) $playlist->id,
+            $playlist->start_at ?? SignageTimeline::origin(),
+            $extra,
+        );
     }
 
     private function finished(Request $request)

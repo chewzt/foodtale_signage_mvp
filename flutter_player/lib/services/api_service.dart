@@ -66,7 +66,7 @@ class ApiService {
     final uri = Uri.parse('$baseUrl/api/time').replace(
       queryParameters: {'t0': '$t0'},
     );
-    final response = await http.get(uri);
+    final response = await http.get(uri).timeout(const Duration(milliseconds: 800));
     final t3 = DateTime.now().microsecondsSinceEpoch;
     if (response.statusCode >= 300) {
       throw Exception('Could not get server time');

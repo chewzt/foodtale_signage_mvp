@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\SignageUrl;
 use Illuminate\Database\Eloquent\Model;
 
 class PlaylistItem extends Model
@@ -20,5 +21,10 @@ class PlaylistItem extends Model
     public function playlist()
     {
         return $this->belongsTo(Playlist::class);
+    }
+
+    public function mediaUrl(): string
+    {
+        return SignageUrl::media($this->path);
     }
 }
