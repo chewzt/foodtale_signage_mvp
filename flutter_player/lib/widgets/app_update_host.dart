@@ -6,6 +6,7 @@ import 'package:open_filex/open_filex.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/api_service.dart';
+import '../services/media_cache.dart';
 
 class AppUpdateHost extends StatefulWidget {
   final ApiService api;
@@ -36,6 +37,7 @@ class _AppUpdateHostState extends State<AppUpdateHost> {
   }
 
   Future<void> _boot() async {
+    await MediaCache.purgeApks();
     try {
       final info = await PackageInfo.fromPlatform();
       _localCode = int.tryParse(info.buildNumber) ?? 0;
@@ -74,8 +76,12 @@ class _AppUpdateHostState extends State<AppUpdateHost> {
       _error = null;
     });
     try {
+      await MediaCache.purgeApks();
       final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/foodtale-player.apk');
+      final file = File('${dir.path}/foodtale-player-${remote.versionCode}.apk');
+      if (await file.exists()) {
+        await file.delete();
+      }
       final client = http.Client();
       try {
         final request = http.Request('GET', Uri.parse(remote.apkUrl));
@@ -105,6 +111,10 @@ class _AppUpdateHostState extends State<AppUpdateHost> {
         setState(() {
           _error = result.message;
         });
+      } else {
+        unawaited(Future<void>.delayed(const Duration(seconds: 8), () {
+          unawaited(MediaCache.purgeApks());
+        }));
       }
     } catch (e) {
       if (mounted) {

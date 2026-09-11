@@ -6,8 +6,6 @@ import 'sync_clock_service.dart';
 class PeerLanService {
   static const int port = 48721;
   static const Duration _staleAfter = Duration(seconds: 2);
-  static const Duration _joinCap = Duration(seconds: 2);
-  static const Duration _joinSettle = Duration(milliseconds: 600);
 
   final SyncClockService clock;
   final void Function() onUpdate;
@@ -16,8 +14,6 @@ class PeerLanService {
 
   RawDatagramSocket? _sock;
   Timer? _announce;
-  Timer? _joinCapTimer;
-  Timer? _joinSettleTimer;
   StreamSubscription<RawSocketEvent>? _sub;
   final Map<int, _Peer> _peers = {};
 
@@ -29,8 +25,7 @@ class PeerLanService {
   bool ready = false;
   bool _started = false;
   bool _joining = false;
-  bool _joinCapFired = false;
-  bool _sawLiveWall = false;
+  bool _wallFormed = false;
 
   int liveIndex = -1;
   int livePositionMs = 0;
@@ -88,15 +83,14 @@ class PeerLanService {
 
   bool get joining => _joining;
 
-  /// A non-joining neighbor was already on the wall while we listened.
-  bool get sawLiveWall => _sawLiveWall;
+  bool get wallFormed => _wallFormed;
 
-  /// Prefetch done, and (if a wall) the roster handshake finished.
-  bool get released => (ready || peerCount <= 1) && !_joining;
+  /// Prefetch done AND (single screen, or every roster member is ready on LAN).
+  bool get released => !_joining;
 
   String get statusLine {
     if (_joining) {
-      return 'peers $peerCount · joining $seenCount';
+      return 'Waiting for screens $readyCount/$peerCount · heard $seenCount';
     }
     final role = isLeader ? 'leader' : 'peer';
     return 'peers $peerCount · lan $role $seenCount';
@@ -115,10 +109,13 @@ class PeerLanService {
     this.axisStartAt = axisStartAt.toUtc();
     if (groupChanged) {
       _peers.clear();
+      ready = false;
+      _wallFormed = false;
       clock.resetGroupSlew();
       _seq = 0;
       _beginJoin();
     }
+    _checkWall();
   }
 
   void setAxisStartAt(DateTime startAt, {bool bumpSeq = false}) {
@@ -187,50 +184,34 @@ class PeerLanService {
   }
 
   void markReady() {
-    if (!ready) {
-      ready = true;
-      if (_joinCapFired || peerCount <= 1) {
-        endJoin();
-      } else {
-        _joinSettleTimer?.cancel();
-        _joinSettleTimer = Timer(_joinSettle, endJoin);
-      }
-      onUpdate();
-    }
+    ready = true;
+    _checkWall();
+    onUpdate();
   }
 
   void endJoin() {
     if (!_joining) return;
     _joining = false;
-    _joinCapTimer?.cancel();
-    _joinSettleTimer?.cancel();
     onUpdate();
   }
 
-  void noteHeardAxis() {
-    if (!_joining || !ready) return;
-    _joinSettleTimer?.cancel();
-    _joinSettleTimer = Timer(_joinSettle, endJoin);
-  }
-
-  void _maybeSettleJoin() {
-    noteHeardAxis();
+  void _checkWall() {
+    if (!_joining) return;
+    if (!ready) return;
+    if (peerCount <= 1 || readyCount >= peerCount) {
+      _wallFormed = true;
+      endJoin();
+    }
   }
 
   void _beginJoin() {
-    _joinCapTimer?.cancel();
-    _joinSettleTimer?.cancel();
-    _joinCapFired = false;
-    _sawLiveWall = false;
     if (peerCount <= 1) {
       _joining = false;
+      _wallFormed = true;
       return;
     }
     _joining = true;
-    _joinCapTimer = Timer(_joinCap, () {
-      _joinCapFired = true;
-      if (ready) endJoin();
-    });
+    _wallFormed = false;
   }
 
   Future<void> start() async {
@@ -252,8 +233,6 @@ class PeerLanService {
 
   void dispose() {
     _announce?.cancel();
-    _joinCapTimer?.cancel();
-    _joinSettleTimer?.cancel();
     _sub?.cancel();
     _sock?.close();
     _peers.clear();
@@ -282,7 +261,6 @@ class PeerLanService {
       final id = (json['id'] as num?)?.toInt() ?? 0;
       if (id == 0 || id == deviceId) return;
       final readyFlag = json['r'] == 1 || json['r'] == true;
-      final joiningFlag = json['j'] == 1 || json['j'] == true;
       final tMs = (json['t'] as num?)?.toInt();
       final startRaw = json['start_at'] as String?;
       final seq = (json['seq'] as num?)?.toInt() ?? 0;
@@ -293,11 +271,6 @@ class PeerLanService {
       final index = (json['i'] as num?)?.toInt() ?? -1;
       final waitingMs = (json['w'] as num?)?.toInt() ?? 0;
       final wantsResync = json['d'] == 1 || json['d'] == true;
-      if (_joining && !joiningFlag && readyFlag) {
-        if (index >= 0 || waitingMs > 0 || wantsResync) {
-          _sawLiveWall = true;
-        }
-      }
       _peers[id] = _Peer(
         id: id,
         ready: readyFlag,
@@ -314,7 +287,7 @@ class PeerLanService {
         heardAt: DateTime.now(),
       );
 
-      _maybeSettleJoin();
+      _checkWall();
       onUpdate();
     } catch (_) {
       // ignore truncated UDP noise

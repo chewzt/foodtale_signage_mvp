@@ -1,7 +1,7 @@
 name: foodtale_signage_player
 description: Foodtale synchronized digital menu MVP player for Android TV boxes.
 publish_to: "none"
-version: 0.1.31+33
+version: 0.1.32+34
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

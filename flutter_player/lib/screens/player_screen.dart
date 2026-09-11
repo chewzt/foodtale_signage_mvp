@@ -2,13 +2,12 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import '../models/player_manifest.dart';
 import '../services/api_service.dart';
 import '../services/kick_ws_service.dart';
 import '../services/manifest_cache.dart';
+import '../services/media_cache.dart';
 import '../services/peer_lan_service.dart';
 import '../services/sync_clock_service.dart';
 
@@ -64,6 +63,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _holdingCut = false;
   int? _preRolledItemId;
   int _playLeadMs = 80;
+  bool _downloading = false;
+  int _dlIndex = 0;
+  int _dlTotal = 0;
+  String _dlName = '';
+  double? _dlProgress;
 
   @override
   void initState() {
@@ -86,6 +90,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       onKick: _onKick,
     );
     WidgetsBinding.instance.addObserver(this);
+    unawaited(MediaCache.purgeApks());
     load();
   }
 
@@ -322,7 +327,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     _contentKey = contentKey;
-    await _prefetchAll(next);
+    try {
+      await _prefetchAll(next);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error = 'Download failed: $e';
+          loading = false;
+        });
+      }
+      return;
+    }
     _peers.markReady();
     if (_peers.released || next.peerCount <= 1) {
       await _prepareCurrent();
@@ -517,25 +532,42 @@ class _PlayerScreenState extends State<PlayerScreen>
     return m.items[index];
   }
 
-  Future<File> _cachedFile(MediaItem item) async {
-    final dir = await getApplicationDocumentsDirectory();
-    final ext = Uri.parse(item.url).pathSegments.last.split('.').last;
-    final file = File('${dir.path}/media_${item.id}.$ext');
-    if (!await file.exists()) {
-      final response = await http
-          .get(Uri.parse(item.url))
-          .timeout(const Duration(seconds: 8));
-      if (response.statusCode >= 300) throw Exception('Download failed');
-      await file.writeAsBytes(response.bodyBytes);
-    }
-    return file;
+  Future<File> _cachedFile(MediaItem item) {
+    return MediaCache.ensure(item);
   }
 
   Future<void> _prefetchAll(PlayerManifest m) async {
-    for (final item in m.items) {
-      try {
-        await _cachedFile(item);
-      } catch (_) {}
+    final items = m.items;
+    _downloading = items.isNotEmpty;
+    _dlTotal = items.length;
+    _dlIndex = 0;
+    _dlName = '';
+    _dlProgress = null;
+    if (mounted) setState(() {});
+    try {
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
+        _dlIndex = i + 1;
+        _dlName = Uri.parse(item.url).pathSegments.isEmpty
+            ? 'clip ${item.id}'
+            : Uri.parse(item.url).pathSegments.last;
+        _dlProgress = null;
+        if (mounted) setState(() {});
+        await MediaCache.ensure(
+          item,
+          onBytes: (got, total) {
+            if (!mounted || total <= 0) return;
+            setState(() => _dlProgress = got / total);
+          },
+        );
+      }
+      final keep = items.map((item) => item.id).toSet();
+      await MediaCache.retainOnly(keep);
+      await MediaCache.reclaimIfLow(keep);
+    } finally {
+      _downloading = false;
+      _dlProgress = null;
+      if (mounted) setState(() {});
     }
   }
 
@@ -766,12 +798,6 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (loading) {
-      return const Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(child: Center(child: CircularProgressIndicator())),
-      );
-    }
     if (error != null) {
       return Scaffold(
         backgroundColor: Colors.black,
@@ -802,8 +828,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
     }
 
-    final m = manifest!;
-    if (!_peers.released && m.peerCount > 1) {
+    final m = manifest;
+    if (m != null && (_downloading || (!_peers.released && m.peerCount > 1))) {
+      final title = _downloading
+          ? 'Downloading $_dlIndex/$_dlTotal'
+          : _peers.statusLine;
+      final detail = _downloading
+          ? (_dlName.isEmpty ? 'Fetching playlist media' : _dlName)
+          : 'All screens must finish download and appear on LAN before playback.';
       return Scaffold(
         backgroundColor: Colors.black,
         body: SafeArea(
@@ -814,24 +846,44 @@ class _PlayerScreenState extends State<PlayerScreen>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _peers.statusLine,
+                    title,
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white, fontSize: 22),
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    _peers.joining
-                        ? 'Joining wall — copying origin from neighbors'
-                        : 'Cold start: waiting for this phone to finish prefetch',
+                    detail,
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white54, fontSize: 14),
                   ),
+                  if (_downloading) ...[
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: 280,
+                      child: LinearProgressIndicator(value: _dlProgress),
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 20),
+                    const CircularProgressIndicator(),
+                  ],
                   _changeServerButton(),
                 ],
               ),
             ),
           ),
         ),
+      );
+    }
+    if (m == null) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(child: Center(child: CircularProgressIndicator())),
+      );
+    }
+    if (loading) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(child: Center(child: CircularProgressIndicator())),
       );
     }
     if (_waitingMs > 0 && controller == null && imageFile == null) {
