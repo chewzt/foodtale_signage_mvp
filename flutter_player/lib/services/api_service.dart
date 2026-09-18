@@ -10,6 +10,12 @@ class ApiService {
     baseUrl = _normalize(url);
   }
 
+  String? get sntpHost {
+    final host = Uri.tryParse(baseUrl)?.host;
+    if (host == null || host.isEmpty) return null;
+    return host;
+  }
+
   static String normalize(String raw) {
     return _normalize(raw);
   }
@@ -138,6 +144,51 @@ class ApiService {
       confirmId: json['confirm_id'] as String? ?? json['next_cut_at'] as String,
     );
   }
+
+  Future<HeartbeatVerdict> postHeartbeat(
+    String token, {
+    required int clockOffsetMs,
+    required int clockRttMs,
+    required int index,
+    required int itemId,
+    required int decoderMs,
+    required int fileMs,
+    required bool looping,
+    required bool playing,
+    required bool ready,
+    required int waitingMs,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/device/heartbeat'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'clock_offset_ms': clockOffsetMs,
+        'clock_rtt_ms': clockRttMs,
+        'index': index,
+        'item_id': itemId,
+        'decoder_ms': decoderMs,
+        'file_ms': fileMs,
+        'looping': looping,
+        'playing': playing,
+        'ready': ready,
+        'waiting_ms': waitingMs,
+      }),
+    );
+    if (response.statusCode >= 300) {
+      throw Exception('Heartbeat error: ${response.body}');
+    }
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    return HeartbeatVerdict(
+      action: json['action'] as String? ?? 'none',
+      index: (json['index'] as num?)?.toInt() ?? -1,
+      positionMs: (json['position_ms'] as num?)?.toInt() ?? 0,
+      lagMs: (json['lag_ms'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 class AppVersion {
@@ -217,6 +268,20 @@ class ManifestFetch {
     required this.unchanged,
     this.etag,
     this.manifest,
+  });
+}
+
+class HeartbeatVerdict {
+  final String action;
+  final int index;
+  final int positionMs;
+  final int lagMs;
+
+  const HeartbeatVerdict({
+    required this.action,
+    required this.index,
+    required this.positionMs,
+    required this.lagMs,
   });
 }
 

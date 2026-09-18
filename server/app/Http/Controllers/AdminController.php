@@ -276,6 +276,13 @@ class AdminController extends Controller
         return $this->finished($request);
     }
 
+    public function deleteDevice(Request $request, Device $device)
+    {
+        $device->delete();
+
+        return $this->finished($request);
+    }
+
     private function finished(Request $request)
     {
         if ($request->expectsJson()) {

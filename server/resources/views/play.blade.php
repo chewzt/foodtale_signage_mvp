@@ -84,6 +84,7 @@ let standbyUrl = '';
 let imageUrl = '';
 let currentIndex = -1;
 let cutTimer = 0;
+let holdForCut = false;
 let cutting = false;
 const tap = document.getElementById('tap');
 
@@ -203,12 +204,22 @@ function renderWait(pos) {
         return true;
     }
     if (pos.waitingMs) {
+        holdForCut = false;
         wait.textContent = 'Sync starts in ' + Math.ceil(pos.waitingMs / 1000) + 's · ' + peerLine();
         show('wait');
         const first = playlist.items[0];
         if (first && first.type === 'video') parkStandby(first);
         return true;
     }
+    if (holdForCut && pos.positionMs > 400) {
+        const remain = pos.item.duration_ms - pos.positionMs;
+        wait.textContent = 'Next cut in ' + Math.max(1, Math.ceil(remain / 1000)) + 's · ' + peerLine();
+        show('wait');
+        const upcoming = nextItem(pos);
+        if (upcoming && upcoming.type === 'video') parkStandby(upcoming);
+        return true;
+    }
+    holdForCut = false;
     return false;
 }
 
@@ -235,6 +246,7 @@ function onCut() {
     if (cutting) return;
     cutting = true;
     try {
+        holdForCut = false;
         const pos = timeline(serverNow());
         if (renderWait(pos)) {
             currentIndex = -1;
@@ -409,6 +421,7 @@ async function refreshManifest() {
     liveUrl = '';
     standbyUrl = '';
     const pos = timeline(serverNow());
+    if (pos && pos.positionMs > 400) holdForCut = true;
     if (!renderWait(pos) && pos) {
         currentIndex = pos.index;
         reveal(pos.item);

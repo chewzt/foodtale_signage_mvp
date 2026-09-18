@@ -6,6 +6,7 @@ use App\Models\Device;
 use App\Support\SignageManifest;
 use App\Support\SignageNtp;
 use App\Support\SignagePeers;
+use App\Support\SignagePlaybackGuard;
 use App\Support\SignageTimeline;
 use Illuminate\Http\Request;
 
@@ -81,7 +82,33 @@ class DeviceController extends Controller
         $device = $this->device($request);
         $this->touchDevice($request, $device);
 
-        return response()->json(['ok' => true]);
+        $playlist = $device->playlist()->with('items')->first();
+        $items = collect($playlist?->items);
+        if ($playlist?->isCarousel()) {
+            $panelCount = max(1, (int) $playlist->panel_count);
+            $panelIndex = min($panelCount - 1, max(0, (int) $device->panel_index));
+            $items = $items->where('panel_index', $panelIndex);
+        }
+        $items = $items->values();
+
+        $verdict = SignagePlaybackGuard::decide($device, $playlist, $items, $request->all());
+
+        $patch = [
+            'play_index' => $request->integer('index', -1),
+            'play_item_id' => $request->integer('item_id') ?: null,
+            'play_decoder_ms' => $request->integer('decoder_ms'),
+            'play_lag_ms' => $verdict['lag_ms'],
+            'play_playing' => $request->boolean('playing'),
+        ];
+        if ($verdict['action'] === 'join') {
+            $patch['resync_until'] = now()->addSeconds(SignagePlaybackGuard::COOLDOWN_SECONDS);
+        }
+        $device->update($patch);
+
+        return response()->json([
+            'ok' => true,
+            ...$verdict,
+        ]);
     }
 
     private function touchDevice(Request $request, Device $device): void

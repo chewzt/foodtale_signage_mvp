@@ -183,35 +183,17 @@ class SignageUpload
             return;
         }
 
-        if (self::videoNeedsTranscode($src)) {
-            self::runFfmpeg($ffmpeg, [
-                '-y', '-i', $src,
-                '-vf', "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '4.0',
-                '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '23',
-                '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
-                '-movflags', '+faststart', '-brand', 'mp42',
-                $dest,
-            ]);
-        } else {
-            try {
-                self::runFfmpeg($ffmpeg, [
-                    '-y', '-i', $src,
-                    '-c', 'copy',
-                    '-movflags', '+faststart', '-brand', 'mp42',
-                    $dest,
-                ]);
-            } catch (ValidationException) {
-                self::runFfmpeg($ffmpeg, [
-                    '-y', '-i', $src,
-                    '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '4.0',
-                    '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '23',
-                    '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
-                    '-movflags', '+faststart', '-brand', 'mp42',
-                    $dest,
-                ]);
-            }
-        }
+        self::runFfmpeg($ffmpeg, [
+            '-y', '-i', $src,
+            '-vf', "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '4.0',
+            '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '23',
+            '-g', '15', '-keyint_min', '15', '-bf', '0',
+            '-x264-params', 'keyint=15:min-keyint=15:scenecut=0',
+            '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
+            '-movflags', '+faststart', '-brand', 'mp42',
+            $dest,
+        ]);
 
         if (! is_file($dest) || filesize($dest) < 32) {
             throw ValidationException::withMessages([

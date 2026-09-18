@@ -6,7 +6,7 @@ use Carbon\Carbon;
 
 class SignageTimeline
 {
-    public static function origin(int $minDelaySeconds = 8, int $alignSeconds = 5): Carbon
+    public static function origin(int $minDelaySeconds = 8, int $alignSeconds = 1): Carbon
     {
         $min = now()->utc()->addSeconds($minDelaySeconds);
         $step = max(1, $alignSeconds);

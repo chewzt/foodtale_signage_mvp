@@ -43,9 +43,11 @@ class SignageDeviceClock
         }
 
         $quality = self::quality($rtt);
+        $lag = $device->play_lag_ms;
+        $lagStr = $lag === null ? '' : ' · lag '.($lag >= 0 ? '+' : '').((int) $lag).'ms';
 
         return [
-            'label' => $quality.' · offset '.$offsetStr.' · rtt '.$rtt.'ms',
+            'label' => $quality.' · offset '.$offsetStr.' · rtt '.$rtt.'ms'.$lagStr,
             'class' => match ($quality) {
                 'ok' => 'clock-ok',
                 'weak' => 'clock-weak',
